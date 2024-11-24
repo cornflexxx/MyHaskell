@@ -30,6 +30,7 @@ and HaskellFun =
 | Fn of HaskellFun * HaskellFun
 | Guard of HaskellFun * ((HaskellFun * HaskellFun) list)
 | Call of (HaskellFun * HaskellFun)
+| Rec of HaskellFun 
 
 (* Enviroment *)
 signature ENV =
@@ -38,6 +39,7 @@ sig
   datatype HsEnv = Empty_hs | Cons_hs of (HaskellFun * HaskellFun) * HsEnv
   val binding: HaskellFun * HaskellFun * HsEnv -> HsEnv
   val solve_ref: HaskellFun * HsEnv -> HaskellFun
+  val clean: HsEnv -> HsEnv
 end
 
 structure Env :> ENV =
@@ -53,6 +55,8 @@ struct
   fun solve_ref (Var x, Cons_hs ((Var y, exp), env)) =
         (if x = y then exp else solve_ref (Var x, env))
     | solve_ref (_, _) = raise RefNotFound
+    fun clean(Cons_hs ((_,_) , env)) = env
+    |clean _ = raise RefNotFound
 end
 
 val env_tmp = ref Env.Empty_hs
@@ -161,7 +165,12 @@ fun eval (K a) = a
       (eval exp_1; eval exp_2)
   | eval (Call (Var fname, arg)) =
       (case Env.solve_ref (Var fname, !env_tmp) of
-         Fn (Var par, body) => (eval (Bind (Var par, arg)); eval body)
+         Rec(Fn (Var par, body)) => (eval (Bind (Var par, K (eval arg))); let 
+         val evalued =  eval body
+         val _ =  (env_tmp := Env.clean (!env_tmp)) in evalued end)
+        | Fn (Var par, body) => (eval (Bind (Var par, arg)); let 
+         val evalued =  eval body
+         val _ =  (env_tmp := Env.clean (!env_tmp)) in evalued end)
        | _ => raise NotEvaluable "Call to non-function")
   | eval (Guard (exp, cases)) =
       let
@@ -174,3 +183,8 @@ fun eval (K a) = a
         matchCases cases
       end
   | eval _ = raise NotEvaluable "Expression not evaluable"
+
+(*
+eval (Bind (Var "Fact" , Rec(Fn( Var "n", Guard( Var "n", [(K (HsInt_v 0), K (HsInt_v 1)),(Var "n", Mul( Var "n",Call(Var "Fact", Minus(Var "n", K (HsInt_v 1)))))])))))
+eval (Call ( Var "Fact", K (HsInt_v 7)));
+*)
