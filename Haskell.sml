@@ -1,4 +1,8 @@
 exception NotEvaluable of string
+exception NotComparable
+exception InvalidOperandType of string
+
+
 (* Types *)
 datatype HaskellType =
   HsInt_t
@@ -30,7 +34,7 @@ and HaskellFun =
 | Fn of HaskellFun * HaskellFun
 | Guard of HaskellFun * ((HaskellFun * HaskellFun) list)
 | Call of (HaskellFun * HaskellFun)
-| Rec of HaskellFun 
+| Rec of HaskellFun
 
 (* Enviroment *)
 signature ENV =
@@ -55,24 +59,39 @@ struct
   fun solve_ref (Var x, Cons_hs ((Var y, exp), env)) =
         (if x = y then exp else solve_ref (Var x, env))
     | solve_ref (_, _) = raise RefNotFound
-    fun clean(Cons_hs ((_,_) , env)) = env
-    |clean _ = raise RefNotFound
+  fun clean (Cons_hs ((_, _), env)) = env
+    | clean _ = raise RefNotFound
 end
 
 val env_tmp = ref Env.Empty_hs
 
 signature EQ =
 sig
-  exception NotComparable
   val eq: HaskellValue * HaskellValue -> HaskellValue
+end
+
+signature BOOLOP =
+sig
+  val and_hs: HaskellValue * HaskellValue -> HaskellValue
+  val or_hs: HaskellValue * HaskellValue -> HaskellValue
+  val not_hs: HaskellValue -> HaskellValue
+end
+
+structure BoolOp :> BOOLOP =
+struct
+  fun and_hs (HsBool_v a, HsBool_v b) =
+        HsBool_v (a andalso b)
+    | and_hs (_, _) = raise InvalidOperandType "Invalid operand type"
+  fun or_hs (HsBool_v a, HsBool_v b) =
+        HsBool_v (a orelse b)
+    | or_hs (_, _) = raise InvalidOperandType "Invalid operand type"
+  fun not_hs (HsBool_v a) =
+        HsBool_v (not a)
+    | not_hs _ = raise InvalidOperandType "Invalid operand type"
 end
 
 structure Eq :> EQ =
 struct
-  exception NotComparable
-  fun andalso_hs (HsBool_v a, HsBool_v b) =
-        HsBool_v (a andalso b)
-    | andalso_hs (_, _) = HsBool_v false
   fun eq (HsInt_v a, HsInt_v b) =
         HsBool_v (a = b)
     | eq (HsInteger_v a, HsInteger_v b) =
@@ -88,19 +107,18 @@ struct
     | eq (HsChar_v a, HsChar_v b) =
         HsBool_v (a = b)
     | eq (HsList_v (a :: l), HsList_v (b :: l')) =
-        andalso_hs (eq (a, b), eq (HsList_v l, HsList_v l'))
+        BoolOp.and_hs (eq (a, b), eq (HsList_v l, HsList_v l'))
     | eq (HsBool_v a, HsBool_v b) =
         HsBool_v (a = b)
     | eq (HsUnit_v a, HsUnit_v b) =
         HsBool_v (a = b)
     | eq (HsTuple_v (a :: l), HsTuple_v (b :: l')) =
-        andalso_hs (eq (a, b), eq (HsTuple_v l, HsTuple_v l'))
+        BoolOp.and_hs (eq (a, b), eq (HsTuple_v l, HsTuple_v l'))
     | eq (_, _) = raise NotComparable
 end
 (* Some numerical operation *)
 signature NUM =
 sig
-  exception InvalidOperandType of string
   val plus: HaskellValue * HaskellValue -> HaskellValue
   val mul: HaskellValue * HaskellValue -> HaskellValue
   val minus: HaskellValue * HaskellValue -> HaskellValue
@@ -111,7 +129,6 @@ end
 
 structure Num :> NUM =
 struct
-  exception InvalidOperandType of string
 
   fun plus (HsInt_v a, HsInt_v b) =
         HsInt_v (a + b)
@@ -148,6 +165,60 @@ struct
     | minus (_, _) = raise InvalidOperandType "Invalid operand type"
 end
 
+signature ORD =
+sig
+  val lt: HaskellValue * HaskellValue -> HaskellValue
+  val le: HaskellValue * HaskellValue -> HaskellValue
+  val gt: HaskellValue * HaskellValue -> HaskellValue
+  val ge: HaskellValue * HaskellValue -> HaskellValue
+  val min: HaskellValue * HaskellValue -> HaskellValue
+  val max: HaskellValue * HaskellValue -> HaskellValue
+end
+
+structure Ord :> ORD =
+struct
+  fun lt (HsInt_v a, HsInt_v b) =
+        HsBool_v (a < b)
+    | lt (HsInteger_v a, HsInteger_v b) =
+        HsBool_v
+          (case LargeInt.compare (a, b) of
+             LESS => true
+           | _ => false)
+    | lt (HsFloat_v a, HsFloat_v b) =
+        HsBool_v (a < b)
+    | lt (HsFloat_v a, HsInt_v b) =
+        HsBool_v (a < Real.fromInt b)
+    | lt (HsInt_v a, HsFloat_v b) =
+        HsBool_v (Real.fromInt a < b)
+    | lt (HsBool_v a, HsBool_v b) =
+        HsBool_v
+          (case (a, b) of
+             (false, true) => true
+           | _ => false)
+    | lt (HsChar_v a, HsChar_v b) =
+        HsBool_v (a < b)
+    | lt (HsList_v (a :: l), HsList_v (b :: l')) =
+        (case lt (a, b) of
+           HsBool_v true => HsBool_v true
+         | HsBool_v false =>
+             (case Eq.eq (a, b) of
+                HsBool_v true => lt (HsList_v l, HsList_v l')
+              | _ => HsBool_v false)
+         | _ => HsBool_v false)
+    | lt (_, _) = raise NotComparable
+  fun le (a, b) =
+    (BoolOp.or_hs (Eq.eq (a, b), lt (a, b)))
+  fun gt (a, b) = lt (b, a)
+  fun ge (a, b) = le (b, a)
+  fun max (a, b) =
+    (case gt (a, b) of
+       HsBool_v true => a
+     | _ => b)
+  fun min (a, b) =
+    (case lt (a, b) of
+       HsBool_v true => a
+     | _ => b)
+end
 
 (* Expression evaluation fun *)
 fun eval (K a) = a
@@ -165,12 +236,24 @@ fun eval (K a) = a
       (eval exp_1; eval exp_2)
   | eval (Call (Var fname, arg)) =
       (case Env.solve_ref (Var fname, !env_tmp) of
-         Rec(Fn (Var par, body)) => (eval (Bind (Var par, K (eval arg))); let 
-         val evalued =  eval body
-         val _ =  (env_tmp := Env.clean (!env_tmp)) in evalued end)
-        | Fn (Var par, body) => (eval (Bind (Var par, arg)); let 
-         val evalued =  eval body
-         val _ =  (env_tmp := Env.clean (!env_tmp)) in evalued end)
+         Rec (Fn (Var par, body)) =>
+           ( eval (Bind (Var par, K (eval arg)))
+           ; let
+               val evalued = eval body
+               val _ = (env_tmp := Env.clean (!env_tmp))
+             in
+               evalued
+             end
+           )
+       | Fn (Var par, body) =>
+           ( eval (Bind (Var par, arg))
+           ; let
+               val evalued = eval body
+               val _ = (env_tmp := Env.clean (!env_tmp))
+             in
+               evalued
+             end
+           )
        | _ => raise NotEvaluable "Call to non-function")
   | eval (Guard (exp, cases)) =
       let
@@ -184,7 +267,13 @@ fun eval (K a) = a
       end
   | eval _ = raise NotEvaluable "Expression not evaluable"
 
-(*
-eval (Bind (Var "Fact" , Rec(Fn( Var "n", Guard( Var "n", [(K (HsInt_v 0), K (HsInt_v 1)),(Var "n", Mul( Var "n",Call(Var "Fact", Minus(Var "n", K (HsInt_v 1)))))])))))
-eval (Call ( Var "Fact", K (HsInt_v 7)));
-*)
+
+val _ = eval (Bind (Var "Fact", Rec (Fn (Var "n", Guard
+  ( Var "n"
+  , [ (K (HsInt_v 0), K (HsInt_v 1))
+    , ( Var "n"
+      , Mul (Var "n", Call (Var "Fact", Minus (Var "n", K (HsInt_v 1))))
+      )
+    ]
+  )))))
+val _ = eval (Call (Var "Fact", K (HsInt_v 7)))
