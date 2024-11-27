@@ -1,5 +1,5 @@
 exception NotEvaluable of string
-
+exception NotTypeable
 exception NotComparable
 exception InvalidOperandType of string
 
@@ -13,6 +13,7 @@ datatype HaskellType =
 | HsBool_t
 | HsList_t of HaskellType
 | HsTuple_t of HaskellType list
+| HsUnit_t
 (* Working types *)
 datatype HaskellValue =
   HsInt_v of int
@@ -282,15 +283,38 @@ fun eval (K a, _) = a
       end
   | eval _ = raise NotEvaluable "Expression not evaluable"
 
+(*Type inference function HaskellFun -> HaskellType wp*)
+fun t (K (HsInt_v _)) = HsInt_t
+  | t (K (HsInteger_v _)) = HsInteger_t
+  | t (K (HsFloat_v _)) = HsFloat_t
+  | t (K (HsBool_v _)) = HsBool_t
+  | t (K (HsChar_v _)) = HsChar_t
+  | t (K (HsList_v (HsInt_v _ :: _))) = HsList_t HsInt_t
+  | t (K (HsList_v (HsInteger_v _ :: _))) = HsList_t HsInteger_t
+  | t (K (HsList_v (HsFloat_v _ :: _))) = HsList_t HsFloat_t
+  | t (K (HsList_v (HsChar_v _ :: _))) = HsList_t HsChar_t
+  | t (K (HsList_v (HsBool_v _ :: _))) = HsList_t HsBool_t
+  | t (K (HsUnit_v _)) = HsUnit_t
+  | t (Var x) =
+      let val (exp, _) = (Env.solve_ref (Var x, !env_tmp))
+      in t exp
+      end
+  | t _ = raise NotTypeable
+
 val _ = eval
   ( Function (Var "Factorial", Var "n", Guard
       ( Var "n"
-      , [ (K (HsInt_v 0), K (HsInt_v 1))
+      , [ (K (HsInteger_v 0), K (HsInteger_v 1))
         , ( Var "n"
           , Mul (Var "n", Call (Var "Factorial", Minus
-              (Var "n", K (HsInt_v 1))))
+              (Var "n", K (HsInteger_v 1))))
           )
         ]
       ))
   , Env.Empty_hs
   )
+
+fun res () =
+  case eval (Call (Var "Factorial", K (HsInteger_v 50)), !env_tmp) of
+    HsInteger_v v => print ("Result of function: " ^ LargeInt.toString v ^"\n")
+  | _ => print "Errore"
