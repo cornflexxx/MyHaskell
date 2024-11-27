@@ -30,7 +30,13 @@ and HaskellFun =
 | Plus of HaskellFun * HaskellFun
 | Minus of HaskellFun * HaskellFun
 | Mul of HaskellFun * HaskellFun
+| Equal of HaskellFun * HaskellFun
+| Lt of HaskellFun * HaskellFun
+| Le of HaskellFun * HaskellFun
+| Gt of HaskellFun * HaskellFun
+| Ge of HaskellFun * HaskellFun
 | Bind of HaskellFun * HaskellFun
+| Seq of HaskellFun * HaskellFun
 | Function of HaskellFun * HaskellFun * HaskellFun
 | Guard of HaskellFun * ((HaskellFun * HaskellFun) list)
 | Call of (HaskellFun * HaskellFun)
@@ -233,6 +239,18 @@ fun eval (K a, _) = a
       Num.minus (eval (a, env), eval (b, env))
   | eval (Mul (a, b), env) =
       Num.mul (eval (a, env), eval (b, env))
+  | eval (Equal (a, b), env) =
+      Eq.eq (eval (a, env), eval (b, env))
+  | eval (Lt (a, b), env) =
+      Ord.lt (eval (a, env), eval (b, env))
+  | eval (Le (a, b), env) =
+      Ord.le (eval (a, env), eval (b, env))
+  | eval (Gt (a, b), env) =
+      Ord.gt (eval (a, env), eval (b, env))
+  | eval (Ge (a, b), env) =
+      Ord.ge (eval (a, env), eval (b, env))
+  | eval (Seq (a, b), env) =
+      (eval (a, env); eval (b, !env_tmp))
   | eval (Var a, env) =
       eval (Env.solve_ref (Var a, env))
   | eval (Closure (_, body), env) = eval (body, env)
