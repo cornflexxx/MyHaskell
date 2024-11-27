@@ -1,4 +1,5 @@
 exception NotEvaluable of string
+
 exception NotComparable
 exception InvalidOperandType of string
 
@@ -30,19 +31,20 @@ and HaskellFun =
 | Minus of HaskellFun * HaskellFun
 | Mul of HaskellFun * HaskellFun
 | Bind of HaskellFun * HaskellFun
-| Seq of HaskellFun * HaskellFun
-| Fn of HaskellFun * HaskellFun
+| Function of HaskellFun * HaskellFun * HaskellFun
 | Guard of HaskellFun * ((HaskellFun * HaskellFun) list)
 | Call of (HaskellFun * HaskellFun)
-| Rec of HaskellFun
+| Closure of HaskellFun * HaskellFun
 
 (* Enviroment *)
 signature ENV =
 sig
   exception RefNotFound
-  datatype HsEnv = Empty_hs | Cons_hs of (HaskellFun * HaskellFun) * HsEnv
+  datatype HsEnv =
+    Empty_hs
+  | Cons_hs of (HaskellFun * HaskellFun * HsEnv) * HsEnv
   val binding: HaskellFun * HaskellFun * HsEnv -> HsEnv
-  val solve_ref: HaskellFun * HsEnv -> HaskellFun
+  val solve_ref: HaskellFun * HsEnv -> HaskellFun * HsEnv
   val clean: HsEnv -> HsEnv
 end
 
@@ -52,18 +54,19 @@ struct
   exception RefNotFound
   exception CantBind
 
-  datatype HsEnv = Empty_hs | Cons_hs of (HaskellFun * HaskellFun) * HsEnv
+  datatype HsEnv =
+    Empty_hs
+  | Cons_hs of (HaskellFun * HaskellFun * HsEnv) * HsEnv
   fun binding (Var x, exp, env) =
-        Cons_hs ((Var x, exp), env)
+        Cons_hs ((Var x, exp, env), env)
     | binding (_, _, _) = raise CantBind
-  fun solve_ref (Var x, Cons_hs ((Var y, exp), env)) =
-        (if x = y then exp else solve_ref (Var x, env))
+  fun solve_ref (Var x, Cons_hs ((Var y, exp, env'), env)) =
+        (if x = y then (exp, env') else solve_ref (Var x, env))
     | solve_ref (_, _) = raise RefNotFound
-  fun clean (Cons_hs ((_, _), env)) = env
+  fun clean (Cons_hs ((_, _, _), env)) = env
     | clean _ = raise RefNotFound
 end
 
-val env_tmp = ref Env.Empty_hs
 
 signature EQ =
 sig
@@ -175,6 +178,8 @@ sig
   val max: HaskellValue * HaskellValue -> HaskellValue
 end
 
+val env_tmp = ref Env.Empty_hs
+
 structure Ord :> ORD =
 struct
   fun lt (HsInt_v a, HsInt_v b) =
@@ -221,59 +226,53 @@ struct
 end
 
 (* Expression evaluation fun *)
-fun eval (K a) = a
-  | eval (Plus (a, b)) =
-      Num.plus (eval a, eval b)
-  | eval (Minus (a, b)) =
-      Num.minus (eval a, eval b)
-  | eval (Mul (a: HaskellFun, b: HaskellFun)) =
-      Num.mul (eval a, eval b)
-  | eval (Var x) =
-      eval (Env.solve_ref (Var x, !env_tmp))
-  | eval (Bind (Var x, exp)) =
-      (env_tmp := Env.binding (Var x, exp, !env_tmp); HsUnit_v ())
-  | eval (Seq (exp_1, exp_2)) =
-      (eval exp_1; eval exp_2)
-  | eval (Call (Var fname, arg)) =
-      (case Env.solve_ref (Var fname, !env_tmp) of
-         Rec (Fn (Var par, body)) =>
-           ( eval (Bind (Var par, K (eval arg)))
-           ; let
-               val evalued = eval body
-               val _ = (env_tmp := Env.clean (!env_tmp))
-             in
-               evalued
-             end
-           )
-       | Fn (Var par, body) =>
-           ( eval (Bind (Var par, arg))
-           ; let
-               val evalued = eval body
-               val _ = (env_tmp := Env.clean (!env_tmp))
-             in
-               evalued
-             end
-           )
-       | _ => raise NotEvaluable "Call to non-function")
-  | eval (Guard (exp, cases)) =
+fun eval (K a, _) = a
+  | eval (Plus (a, b), env) =
+      Num.plus (eval (a, env), eval (b, env))
+  | eval (Minus (a, b), env) =
+      Num.minus (eval (a, env), eval (b, env))
+  | eval (Mul (a, b), env) =
+      Num.mul (eval (a, env), eval (b, env))
+  | eval (Var a, env) =
+      eval (Env.solve_ref (Var a, env))
+  | eval (Closure (_, body), env) = eval (body, env)
+  | eval (Bind (Var a, exp), env) =
+      (env_tmp := Env.binding (Var a, exp, env); HsUnit_v ())
+  | eval (Function (Var fname, par, body), env) =
+      ( env_tmp := Env.binding (Var fname, Closure (par, body), env)
+      ; HsUnit_v ()
+      )
+  | eval (Call (Var fname, arg), env) =
+      (case Env.solve_ref (Var fname, env) of
+         (Closure (par, body), _) =>
+           eval (body, Env.Cons_hs ((par, arg, env), env))
+       | _ => raise NotEvaluable "Expression not evaluable")
+
+  | eval (Call (Function (Var fname, par, body), arg), env) =
+      eval (body, Env.Cons_hs ((par, arg, env), Env.Cons_hs
+        ((Var fname, Closure (par, body), env), env)))
+
+  | eval (Guard (exp, cases), env) =
       let
         fun matchCases [] = raise NotEvaluable "No matching case"
           | matchCases ((case_i, exp_i) :: other_case) =
-              (case Eq.eq (eval exp, eval case_i) of
-                 HsBool_v true => eval exp_i
+              (case Eq.eq (eval (exp, env), eval (case_i, env)) of
+                 HsBool_v true => eval (exp_i, env)
                | _ => matchCases other_case)
       in
         matchCases cases
       end
   | eval _ = raise NotEvaluable "Expression not evaluable"
 
-
-val _ = eval (Bind (Var "Fact", Rec (Fn (Var "n", Guard
-  ( Var "n"
-  , [ (K (HsInt_v 0), K (HsInt_v 1))
-    , ( Var "n"
-      , Mul (Var "n", Call (Var "Fact", Minus (Var "n", K (HsInt_v 1))))
-      )
-    ]
-  )))))
-val _ = eval (Call (Var "Fact", K (HsInt_v 7)))
+val _ = eval
+  ( Function (Var "Factorial", Var "n", Guard
+      ( Var "n"
+      , [ (K (HsInt_v 0), K (HsInt_v 1))
+        , ( Var "n"
+          , Mul (Var "n", Call (Var "Factorial", Minus
+              (Var "n", K (HsInt_v 1))))
+          )
+        ]
+      ))
+  , Env.Empty_hs
+  )
