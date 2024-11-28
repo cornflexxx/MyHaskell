@@ -14,6 +14,8 @@ datatype HaskellType =
 | HsList_t of HaskellType
 | HsTuple_t of HaskellType list
 | HsUnit_t
+| HsArrow_t of HaskellType * HaskellType
+| HsAbstract_t
 (* Working types *)
 datatype HaskellValue =
   HsInt_v of int
@@ -41,6 +43,9 @@ and HaskellFun =
 | Function of HaskellFun * HaskellFun * HaskellFun
 | Guard of HaskellFun * ((HaskellFun * HaskellFun) list)
 | Call of (HaskellFun * HaskellFun)
+| If of HaskellFun * HaskellFun * HaskellFun
+| Let of HaskellFun * HaskellFun
+| Lambda of HaskellFun * HaskellFun
 | Closure of HaskellFun * HaskellFun
 
 (* Enviroment *)
@@ -75,10 +80,14 @@ struct
 end
 
 
-signature EQ =
+(* Context for type inference *)
+signature CONTEXT =
 sig
-  val eq: HaskellValue * HaskellValue -> HaskellValue
+  datatype HsContext = Empty_hs | Cons_hs of HaskellFun * HaskellType
 end
+
+structure Context :> CONTEXT =
+struct datatype HsContext = Empty_hs | Cons_hs of HaskellFun * HaskellType end
 
 signature BOOLOP =
 sig
@@ -98,6 +107,11 @@ struct
   fun not_hs (HsBool_v a) =
         HsBool_v (not a)
     | not_hs _ = raise InvalidOperandType "Invalid operand type"
+end
+
+signature EQ =
+sig
+  val eq: HaskellValue * HaskellValue -> HaskellValue
 end
 
 structure Eq :> EQ =
@@ -281,24 +295,22 @@ fun eval (K a, _) = a
       in
         matchCases cases
       end
+  (* eval Lambda( ... ) *)
   | eval _ = raise NotEvaluable "Expression not evaluable"
 
-(*Type inference function HaskellFun -> HaskellType wp*)
-fun t (K (HsInt_v _)) = HsInt_t
-  | t (K (HsInteger_v _)) = HsInteger_t
-  | t (K (HsFloat_v _)) = HsFloat_t
-  | t (K (HsBool_v _)) = HsBool_t
-  | t (K (HsChar_v _)) = HsChar_t
-  | t (K (HsList_v (HsInt_v _ :: _))) = HsList_t HsInt_t
-  | t (K (HsList_v (HsInteger_v _ :: _))) = HsList_t HsInteger_t
-  | t (K (HsList_v (HsFloat_v _ :: _))) = HsList_t HsFloat_t
-  | t (K (HsList_v (HsChar_v _ :: _))) = HsList_t HsChar_t
-  | t (K (HsList_v (HsBool_v _ :: _))) = HsList_t HsBool_t
-  | t (K (HsUnit_v _)) = HsUnit_t
-  | t (Var x) =
-      let val (exp, _) = (Env.solve_ref (Var x, !env_tmp))
-      in t exp
-      end
+(*Type inference function HaskellFun * Context.HsContext -> HaskellType wp*)
+fun t (K (HsInt_v _), _) = HsInt_t
+  | t (K (HsInteger_v _), _) = HsInteger_t
+  | t (K (HsFloat_v _), _) = HsFloat_t
+  | t (K (HsBool_v _), _) = HsBool_t
+  | t (K (HsChar_v _), _) = HsChar_t
+  | t (K (HsList_v (HsInt_v _ :: _)), _) = HsList_t HsInt_t
+  | t (K (HsList_v (HsInteger_v _ :: _)), _) = HsList_t HsInteger_t
+  | t (K (HsList_v (HsFloat_v _ :: _)), _) = HsList_t HsFloat_t
+  | t (K (HsList_v (HsChar_v _ :: _)), _) = HsList_t HsChar_t
+  | t (K (HsList_v (HsBool_v _ :: _)), _) = HsList_t HsBool_t
+  | t (K (HsUnit_v _), _) = HsUnit_t
+  (* t(Function ...*)
   | t _ = raise NotTypeable
 
 val _ = eval
@@ -316,5 +328,5 @@ val _ = eval
 
 fun res () =
   case eval (Call (Var "Factorial", K (HsInteger_v 50)), !env_tmp) of
-    HsInteger_v v => print ("Result of function: " ^ LargeInt.toString v ^"\n")
+    HsInteger_v v => print ("Result of function: " ^ LargeInt.toString v ^ "\n")
   | _ => print "Errore"
