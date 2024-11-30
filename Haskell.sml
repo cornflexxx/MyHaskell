@@ -24,7 +24,7 @@ datatype HaskellValue =
 | HsFloat_v of real
 | HsChar_v of char
 | HsBool_v of bool
-| HsList_v of HaskellValue list 
+| HsList_v of HaskellValue list
 | HsTuple_v of HaskellValue list
 | HsUnit_v of unit
 (*Lazy list, methods and list comprehension *)
@@ -276,7 +276,7 @@ fun eval (K a, _) = a
       eval (Env.solve_ref (Var a, env))
   | eval (Closure (_, body), env) = eval (body, env)
   | eval (Bind (Var a, exp), env) =
-      (env_tmp := Env.binding (Var a, exp, env); HsUnit_v ()) 
+      (env_tmp := Env.binding (Var a, exp, env); HsUnit_v ())
   | eval (Function (Var fname, par, body), env) =
       ( env_tmp := Env.binding (Var fname, Closure (par, body), env)
       ; HsUnit_v ()
@@ -284,13 +284,13 @@ fun eval (K a, _) = a
   | eval (Call (Var fname, arg), env) =
       (case Env.solve_ref (Var fname, env) of
          (Closure (par, body), _) => eval (body, Env.bind_list (par, arg, env))
+       | (Lambda (par, body), _) => eval (Call (Lambda (par, body), arg), env)
        | _ => raise NotEvaluable "Expression not evaluable")
   | eval (Call (Function (Var fname, par, body), args), env) =
       eval (body, Env.Cons_hs
         ((Var fname, Closure (par, body), env), Env.bind_list (par, args, env)))
   | eval (Call (Lambda (par, body), arg), env) =
       eval (body, Env.bind_list (par, arg, env))
-  (* Do a better implementation of Lambda functions and passing parameters (Curry) *)
   | eval (Guard (exp, cases), env) =
       let
         fun matchCases [] = raise NotEvaluable "No matching case"
@@ -332,6 +332,8 @@ fun t (K (HsInt_v _), _) = HsInt_t
   (* t(Function ...*)
   | t _ = raise NotTypeable
 
+
+(* Recursive factorial *)
 val _ = eval
   ( Function (Var "Factorial", [Var "n"], Guard
       ( Var "n"
@@ -345,7 +347,22 @@ val _ = eval
   , Env.Empty_hs
   )
 
-fun res () =
+fun res_1 () =
   case eval (Call (Var "Factorial", [K (HsInteger_v 20)]), !env_tmp) of
     HsInteger_v v => print ("Result of function: " ^ LargeInt.toString v ^ "\n")
   | _ => print "Errore"
+
+(* Function that takes function as input *)
+val _ = eval
+  ( Function (Var "Do2Times", [Var "fn", Var "x"], Call
+      (Var "fn", [Call (Var "fn", [Var "x"])]))
+  , Env.Empty_hs
+  )
+
+val res_2 = eval
+  ( Call
+      ( Var "Do2Times"
+      , [Lambda ([Var "y"], Mul (Var "y", K (HsInt_v 3))), K (HsInt_v 10)]
+      )
+  , !env_tmp
+  )
