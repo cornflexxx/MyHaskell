@@ -16,6 +16,7 @@ datatype HaskellType =
 | HsUnit_t
 | HsArrow_t of HaskellType * HaskellType
 | HsAbstract_t
+
 (* Working types *)
 datatype HaskellValue =
   HsInt_v of int
@@ -23,9 +24,11 @@ datatype HaskellValue =
 | HsFloat_v of real
 | HsChar_v of char
 | HsBool_v of bool
-| HsList_v of HaskellValue list
+| HsList_v of HaskellValue list 
 | HsTuple_v of HaskellValue list
 | HsUnit_v of unit
+(*Lazy list, methods and list comprehension *)
+
 (* MyHaskell expressions *)
 and HaskellFun =
   K of HaskellValue
@@ -39,14 +42,13 @@ and HaskellFun =
 | Gt of HaskellFun * HaskellFun
 | Ge of HaskellFun * HaskellFun
 | Bind of HaskellFun * HaskellFun
-| Seq of HaskellFun * HaskellFun
-| Function of HaskellFun * HaskellFun * HaskellFun
+| Function of HaskellFun * HaskellFun list * HaskellFun
 | Guard of HaskellFun * ((HaskellFun * HaskellFun) list)
-| Call of (HaskellFun * HaskellFun)
+| Call of (HaskellFun * HaskellFun list)
 | If of HaskellFun * HaskellFun * HaskellFun
 | Let of HaskellFun * HaskellFun
-| Lambda of HaskellFun * HaskellFun
-| Closure of HaskellFun * HaskellFun
+| Lambda of HaskellFun list * HaskellFun
+| Closure of HaskellFun list * HaskellFun
 
 (* Enviroment *)
 signature ENV =
@@ -58,6 +60,7 @@ sig
   val binding: HaskellFun * HaskellFun * HsEnv -> HsEnv
   val solve_ref: HaskellFun * HsEnv -> HaskellFun * HsEnv
   val clean: HsEnv -> HsEnv
+  val bind_list: HaskellFun list * HaskellFun list * HsEnv -> HsEnv
 end
 
 structure Env :> ENV =
@@ -77,6 +80,11 @@ struct
     | solve_ref (_, _) = raise RefNotFound
   fun clean (Cons_hs ((_, _, _), env)) = env
     | clean _ = raise RefNotFound
+  fun bind_list (_, [], env) = env
+    | bind_list (Var p :: params, expr :: exprs, env) =
+        Cons_hs ((Var p, expr, env), bind_list (params, exprs, env))
+    | bind_list _ = raise CantBind
+
 end
 
 
@@ -188,7 +196,7 @@ struct
         HsFloat_v (Real.- (f, (Real.fromInt i)))
     | minus (_, _) = raise InvalidOperandType "Invalid operand type"
 end
-
+(* Other typeclasses  Show, Read, Functor *)
 signature ORD =
 sig
   val lt: HaskellValue * HaskellValue -> HaskellValue
@@ -264,27 +272,25 @@ fun eval (K a, _) = a
       Ord.gt (eval (a, env), eval (b, env))
   | eval (Ge (a, b), env) =
       Ord.ge (eval (a, env), eval (b, env))
-  | eval (Seq (a, b), env) =
-      (eval (a, env); eval (b, !env_tmp))
   | eval (Var a, env) =
       eval (Env.solve_ref (Var a, env))
   | eval (Closure (_, body), env) = eval (body, env)
   | eval (Bind (Var a, exp), env) =
-      (env_tmp := Env.binding (Var a, exp, env); HsUnit_v ())
+      (env_tmp := Env.binding (Var a, exp, env); HsUnit_v ()) 
   | eval (Function (Var fname, par, body), env) =
       ( env_tmp := Env.binding (Var fname, Closure (par, body), env)
       ; HsUnit_v ()
       )
   | eval (Call (Var fname, arg), env) =
       (case Env.solve_ref (Var fname, env) of
-         (Closure (par, body), _) =>
-           eval (body, Env.Cons_hs ((par, arg, env), env))
+         (Closure (par, body), _) => eval (body, Env.bind_list (par, arg, env))
        | _ => raise NotEvaluable "Expression not evaluable")
-
-  | eval (Call (Function (Var fname, par, body), arg), env) =
-      eval (body, Env.Cons_hs ((par, arg, env), Env.Cons_hs
-        ((Var fname, Closure (par, body), env), env)))
-
+  | eval (Call (Function (Var fname, par, body), args), env) =
+      eval (body, Env.Cons_hs
+        ((Var fname, Closure (par, body), env), Env.bind_list (par, args, env)))
+  | eval (Call (Lambda (par, body), arg), env) =
+      eval (body, Env.bind_list (par, arg, env))
+  (* Do a better implementation of Lambda functions and passing parameters (Curry) *)
   | eval (Guard (exp, cases), env) =
       let
         fun matchCases [] = raise NotEvaluable "No matching case"
@@ -295,7 +301,20 @@ fun eval (K a, _) = a
       in
         matchCases cases
       end
-  (* eval Lambda( ... ) *)
+  | eval (Let (Bind a, b), env) =
+      ( eval (Bind a, env)
+      ; let
+          val evaluation = eval (b, env)
+          val _ = Env.clean (!env_tmp)
+        in
+          evaluation
+        end
+      )
+  | eval (If (condition, caseT, caseF), env) =
+      (case eval (condition, env) of
+         HsBool_v true => eval (caseT, env)
+       | HsBool_v false => eval (caseF, env)
+       | _ => raise NotEvaluable "Not a Bool")
   | eval _ = raise NotEvaluable "Expression not evaluable"
 
 (*Type inference function HaskellFun * Context.HsContext -> HaskellType wp*)
@@ -314,12 +333,12 @@ fun t (K (HsInt_v _), _) = HsInt_t
   | t _ = raise NotTypeable
 
 val _ = eval
-  ( Function (Var "Factorial", Var "n", Guard
+  ( Function (Var "Factorial", [Var "n"], Guard
       ( Var "n"
       , [ (K (HsInteger_v 0), K (HsInteger_v 1))
         , ( Var "n"
-          , Mul (Var "n", Call (Var "Factorial", Minus
-              (Var "n", K (HsInteger_v 1))))
+          , Mul (Var "n", Call
+              (Var "Factorial", [Minus (Var "n", K (HsInteger_v 1))]))
           )
         ]
       ))
@@ -327,6 +346,6 @@ val _ = eval
   )
 
 fun res () =
-  case eval (Call (Var "Factorial", K (HsInteger_v 50)), !env_tmp) of
+  case eval (Call (Var "Factorial", [K (HsInteger_v 20)]), !env_tmp) of
     HsInteger_v v => print ("Result of function: " ^ LargeInt.toString v ^ "\n")
   | _ => print "Errore"
