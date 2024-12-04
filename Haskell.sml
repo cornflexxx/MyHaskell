@@ -12,10 +12,23 @@ datatype HaskellType =
 | HsChar_t
 | HsBool_t
 | HsList_t of HaskellType
-| HsTuple_t of HaskellType list
+| HsTuple_t of HaskellType
 | HsUnit_t
 | HsArrow_t of HaskellType * HaskellType
-| HsAbstract_t
+| HsAbstract_t of string
+
+(* Default typeclass *)
+datatype TypeClass =
+  Num of HaskellType
+| Ord of HaskellType
+| Eq of HaskellType
+| Fractional of HaskellType
+| Read of HaskellType
+| Show of HaskellType
+| Integral of HaskellType
+(* Custom TypeClasses*)
+(* signature CUSTOMTYPECLASS
+Functor to create Custom TypeClasses *)
 
 (* Working types *)
 datatype HaskellValue =
@@ -47,7 +60,7 @@ and HaskellFun =
 | Call of (HaskellFun * HaskellFun list)
 | If of HaskellFun * HaskellFun * HaskellFun
 | Let of HaskellFun * HaskellFun
-| Lambda of HaskellFun list * HaskellFun
+| Lambda of HaskellFun * HaskellFun
 | Closure of HaskellFun list * HaskellFun
 
 (* Enviroment *)
@@ -61,6 +74,7 @@ sig
   val solve_ref: HaskellFun * HsEnv -> HaskellFun * HsEnv
   val clean: HsEnv -> HsEnv
   val bind_list: HaskellFun list * HaskellFun list * HsEnv -> HsEnv
+  val bind_curried: HaskellFun * HaskellFun list * HsEnv * HaskellFun -> HsEnv
 end
 
 structure Env :> ENV =
@@ -84,6 +98,13 @@ struct
     | bind_list (Var p :: params, expr :: exprs, env) =
         Cons_hs ((Var p, expr, env), bind_list (params, exprs, env))
     | bind_list _ = raise CantBind
+  fun bind_curried (Var par, arg :: args, env, Lambda (Var par', body')) =
+        Cons_hs ((Var par, arg, env), bind_curried (Var par', args, env, body'))
+    | bind_curried (Var par, arg :: [], env, _) =
+        Cons_hs ((Var par, arg, env), env)
+    | bind_curried (_, [], env, _) = env
+    | bind_curried _ = raise CantBind
+
 
 end
 
@@ -91,11 +112,59 @@ end
 (* Context for type inference *)
 signature CONTEXT =
 sig
-  datatype HsContext = Empty_hs | Cons_hs of HaskellFun * HaskellType
+  exception TypeNotFound
+  datatype HsContext =
+    Empty_hs
+  | Cons_hs of (HaskellFun * HaskellType) * HsContext
+  val cntxt_search: HaskellFun * HsContext -> HaskellType
+
 end
 
 structure Context :> CONTEXT =
-struct datatype HsContext = Empty_hs | Cons_hs of HaskellFun * HaskellType end
+struct
+  exception TypeNotFound
+  datatype HsContext =
+    Empty_hs
+  | Cons_hs of (HaskellFun * HaskellType) * HsContext
+  fun cntxt_search (Var x, Cons_hs ((Var y, typ), cntxt)) =
+        if x = y then typ else cntxt_search (Var x, cntxt)
+    | cntxt_search (_, _) = HsAbstract_t "a"
+end
+
+signature TYPEOP =
+sig
+  val compare: HaskellType * HaskellType -> HaskellType
+end
+
+structure TypeOp :> TYPEOP =
+struct
+  fun compare (HsFloat_t, HsInt_t) = HsFloat_t
+    | compare (HsInt_t, HsFloat_t) = HsFloat_t
+    | compare (HsFloat_t, HsInteger_t) = HsFloat_t
+    | compare (HsInteger_t, HsFloat_t) = HsFloat_t
+    | compare (HsInt_t, HsInteger_t) = HsInteger_t
+    | compare (HsInteger_t, HsInt_t) = HsInteger_t
+    | compare (HsInt_t, HsInt_t) = HsInt_t
+    | compare (HsFloat_t, HsFloat_t) = HsFloat_t
+    | compare (HsInteger_t, HsInteger_t) = HsInteger_t
+    | compare (HsBool_t, HsBool_t) = HsBool_t
+    | compare (HsList_t typ, HsList_t typ') = compare (typ, typ')
+    | compare (HsTuple_t typ, HsTuple_t typ') = compare (typ, typ')
+    | compare (HsChar_t, HsChar_t) = HsChar_t
+    | compare _ = raise NotComparable
+
+
+end
+
+(* Infinite Lists naturals [1..] or [2,4..24] ...*)
+signature LAZYLIST =
+sig
+  datatype 'a lazylist = Empty | Cons of 'a * (unit -> 'a lazylist)
+end
+
+structure LazyList :> LAZYLIST =
+struct datatype 'a lazylist = Empty | Cons of 'a * (unit -> 'a lazylist) end
+
 
 signature BOOLOP =
 sig
@@ -208,6 +277,7 @@ sig
 end
 
 val env_tmp = ref Env.Empty_hs
+val cntxt_tmp = ref Context.Empty_hs
 
 structure Ord :> ORD =
 struct
@@ -254,7 +324,8 @@ struct
      | _ => b)
 end
 
-(* Expression evaluation fun *)
+(* Expression evaluation fun 
+TODO : improve curried fn*)
 fun eval (K a, _) = a
   | eval (Plus (a, b), env) =
       Num.plus (eval (a, env), eval (b, env))
@@ -281,6 +352,7 @@ fun eval (K a, _) = a
       ( env_tmp := Env.binding (Var fname, Closure (par, body), env)
       ; HsUnit_v ()
       )
+  | eval (Lambda (_, body), env) = eval (body, env)
   | eval (Call (Var fname, arg), env) =
       (case Env.solve_ref (Var fname, env) of
          (Closure (par, body), _) => eval (body, Env.bind_list (par, arg, env))
@@ -290,7 +362,7 @@ fun eval (K a, _) = a
       eval (body, Env.Cons_hs
         ((Var fname, Closure (par, body), env), Env.bind_list (par, args, env)))
   | eval (Call (Lambda (par, body), arg), env) =
-      eval (body, Env.bind_list (par, arg, env))
+      eval (body, Env.bind_curried (par, arg, env, body))
   | eval (Guard (exp, cases), env) =
       let
         fun matchCases [] = raise NotEvaluable "No matching case"
@@ -317,7 +389,8 @@ fun eval (K a, _) = a
        | _ => raise NotEvaluable "Not a Bool")
   | eval _ = raise NotEvaluable "Expression not evaluable"
 
-(*Type inference function HaskellFun * Context.HsContext -> HaskellType wp*)
+(*Type inference function HaskellFun * Context.HsContext -> HaskellType 
+TODO : rewrite everything using typeclasses*)
 fun t (K (HsInt_v _), _) = HsInt_t
   | t (K (HsInteger_v _), _) = HsInteger_t
   | t (K (HsFloat_v _), _) = HsFloat_t
@@ -329,7 +402,18 @@ fun t (K (HsInt_v _), _) = HsInt_t
   | t (K (HsList_v (HsChar_v _ :: _)), _) = HsList_t HsChar_t
   | t (K (HsList_v (HsBool_v _ :: _)), _) = HsList_t HsBool_t
   | t (K (HsUnit_v _), _) = HsUnit_t
-  (* t(Function ...*)
+  | t (Var x, cntxt) =
+      Context.cntxt_search (Var x, cntxt)
+  | t (Plus (exp1, exp2), cntxt) =
+      TypeOp.compare (t (exp1, cntxt), t (exp2, cntxt))
+  | t (Mul (exp1, exp2), cntxt) =
+      TypeOp.compare (t (exp1, cntxt), t (exp2, cntxt))
+  | t (Minus (exp1, exp2), cntxt) =
+      TypeOp.compare (t (exp1, cntxt), t (exp2, cntxt))
+  | t (Equal (exp1, exp2), cntxt) =
+      (TypeOp.compare (t (exp1, cntxt), t (exp2, cntxt)); HsBool_t)
+  | t (Lt (exp1, exp2), cntxt) =
+      (TypeOp.compare (t (exp1, cntxt), t (exp2, cntxt)); HsBool_t)
   | t _ = raise NotTypeable
 
 
@@ -352,7 +436,7 @@ fun res_1 () =
     HsInteger_v v => print ("Result of function: " ^ LargeInt.toString v ^ "\n")
   | _ => print "Errore"
 
-(* Function that takes function as input *)
+(*Function that takes function as input*)
 val _ = eval
   ( Function (Var "Do2Times", [Var "fn", Var "x"], Call
       (Var "fn", [Call (Var "fn", [Var "x"])]))
@@ -362,7 +446,15 @@ val _ = eval
 val res_2 = eval
   ( Call
       ( Var "Do2Times"
-      , [Lambda ([Var "y"], Mul (Var "y", K (HsInt_v 3))), K (HsInt_v 10)]
+      , [Lambda (Var "y", Mul (Var "y", K (HsInt_v 3))), K (HsInt_v 10)]
       )
   , !env_tmp
+  )
+
+val curried_fn = eval
+  ( Call
+      ( Lambda (Var "x", Lambda (Var "y", Plus (Var "x", Var "y")))
+      , [K (HsInt_v 10), K (HsInt_v 12)]
+      )
+  , Env.Empty_hs
   )
