@@ -15,7 +15,7 @@ datatype HaskellType =
 | HsTuple_t of HaskellType
 | HsUnit_t
 | HsArrow_t of HaskellType * HaskellType
-| HsAbstract_t of string
+| HsAbstract_t
 
 (* Default typeclass *)
 datatype TypeClass =
@@ -28,7 +28,7 @@ datatype TypeClass =
 | Integral of HaskellType
 (* Custom TypeClasses*)
 (* signature CUSTOMTYPECLASS
-Functor to create Custom TypeClasses *)
+TODO: Functor to create Custom TypeClasses *)
 
 (* Working types *)
 datatype HaskellValue =
@@ -74,7 +74,8 @@ sig
   val solve_ref: HaskellFun * HsEnv -> HaskellFun * HsEnv
   val clean: HsEnv -> HsEnv
   val bind_list: HaskellFun list * HaskellFun list * HsEnv -> HsEnv
-  val bind_curried: HaskellFun * HaskellFun list * HsEnv * HaskellFun -> HsEnv
+  val bind_curried: HaskellFun * HaskellFun list * HsEnv * HaskellFun
+                    -> HsEnv * HaskellFun
 end
 
 structure Env :> ENV =
@@ -99,10 +100,12 @@ struct
         Cons_hs ((Var p, expr, env), bind_list (params, exprs, env))
     | bind_list _ = raise CantBind
   fun bind_curried (Var par, arg :: args, env, Lambda (Var par', body')) =
-        Cons_hs ((Var par, arg, env), bind_curried (Var par', args, env, body'))
-    | bind_curried (Var par, arg :: [], env, _) =
-        Cons_hs ((Var par, arg, env), env)
-    | bind_curried (_, [], env, _) = env
+        let val (env', lambda) = bind_curried (Var par', args, env, body')
+        in (Cons_hs ((Var par, arg, env), env'), lambda)
+        end
+    | bind_curried (Var par, arg :: [], env, body) =
+        (Cons_hs ((Var par, arg, env), env), body)
+    | bind_curried (_, [], env, body) = (env, body)
     | bind_curried _ = raise CantBind
 
 
@@ -128,7 +131,7 @@ struct
   | Cons_hs of (HaskellFun * HaskellType) * HsContext
   fun cntxt_search (Var x, Cons_hs ((Var y, typ), cntxt)) =
         if x = y then typ else cntxt_search (Var x, cntxt)
-    | cntxt_search (_, _) = HsAbstract_t "a"
+    | cntxt_search (_, _) = HsAbstract_t
 end
 
 signature TYPEOP =
@@ -346,6 +349,48 @@ fun eval (K a, _) = a
   | eval (Var a, env) =
       eval (Env.solve_ref (Var a, env))
   | eval (Closure (_, body), env) = eval (body, env)
+  | eval (Bind (Var a, (Call (Lambda (par, body), args))), env) =
+      let
+        fun count_params (Lambda (_, body')) = 1 + count_params body'
+          | count_params _ = 0
+      in
+        if length args < count_params (Lambda (par, body)) then
+          let
+            val (env', body') = Env.bind_curried
+              (par, args, env, Lambda (par, body))
+          in
+            eval (Bind (Var a, body'), env')
+          end
+        else if length args = count_params (Lambda (par, body)) then
+          ( env_tmp
+            := Env.binding (Var a, (Call (Lambda (par, body), args)), env)
+          ; HsUnit_v ()
+          )
+        else
+          raise NotEvaluable "Expression not evaluable"
+      end
+  | eval (Bind (Var a, Call (Function (Var fname, params, body), args)), env) =
+      if length args < length params then
+        let
+          fun take (0, _: 'a list) = []
+            | take (_, []) = []
+            | take (n, a :: l : 'a list) =
+                a :: take (n - 1, l)
+          val diff = length params - length args
+          val env' = Env.bind_list (params, args, env)
+        in
+          eval (Function (Var a, take (diff, rev params), body), env')
+        end
+      else if length params = length args then
+        ( env_tmp
+          :=
+          Env.binding
+            (Var a, (Call (Function (Var fname, params, body), args)), env)
+        ; HsUnit_v ()
+        )
+      else
+        raise NotEvaluable "Expression not evaluable"
+
   | eval (Bind (Var a, exp), env) =
       (env_tmp := Env.binding (Var a, exp, env); HsUnit_v ())
   | eval (Function (Var fname, par, body), env) =
@@ -362,7 +407,9 @@ fun eval (K a, _) = a
       eval (body, Env.Cons_hs
         ((Var fname, Closure (par, body), env), Env.bind_list (par, args, env)))
   | eval (Call (Lambda (par, body), arg), env) =
-      eval (body, Env.bind_curried (par, arg, env, body))
+      let val (env', _) = Env.bind_curried (par, arg, env, body)
+      in eval (body, env')
+      end
   | eval (Guard (exp, cases), env) =
       let
         fun matchCases [] = raise NotEvaluable "No matching case"
@@ -390,7 +437,7 @@ fun eval (K a, _) = a
   | eval _ = raise NotEvaluable "Expression not evaluable"
 
 (*Type inference function HaskellFun * Context.HsContext -> HaskellType 
-TODO : rewrite everything using typeclasses*)
+TODO: rewrite everything using typeclasses*)
 fun t (K (HsInt_v _), _) = HsInt_t
   | t (K (HsInteger_v _), _) = HsInteger_t
   | t (K (HsFloat_v _), _) = HsFloat_t
@@ -436,13 +483,12 @@ fun res_1 () =
     HsInteger_v v => print ("Result of function: " ^ LargeInt.toString v ^ "\n")
   | _ => print "Errore"
 
-(*Function that takes function as input*)
+
 val _ = eval
   ( Function (Var "Do2Times", [Var "fn", Var "x"], Call
       (Var "fn", [Call (Var "fn", [Var "x"])]))
   , Env.Empty_hs
   )
-
 val res_2 = eval
   ( Call
       ( Var "Do2Times"
@@ -451,10 +497,18 @@ val res_2 = eval
   , !env_tmp
   )
 
-val curried_fn = eval
+val curried_fn1 = eval
   ( Call
       ( Lambda (Var "x", Lambda (Var "y", Plus (Var "x", Var "y")))
       , [K (HsInt_v 10), K (HsInt_v 12)]
       )
+  , Env.Empty_hs
+  )
+
+val curried_fn2 = eval
+  ( Bind (Var "add4", Call
+      ( Lambda (Var "x", Lambda (Var "y", Plus (Var "x", Var "y")))
+      , [K (HsInt_v 4)]
+      ))
   , Env.Empty_hs
   )
